@@ -1,1 +1,7 @@
 name: solutionpinner
+version: 0.1.0
+author: JowiDigital
+runtime: 'latest'
+capabilities:
+  redditAPI: true
+  redis: true

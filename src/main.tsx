@@ -420,10 +420,12 @@ Devvit.addCustomPostType({
       // initial fetch
       await fetchAndSet();
 
-      // poll every 3s (no reliable cleanup API available in Blocks; this is acceptable for short-lived render contexts)
+      // poll every 15s to reduce Redis calls and avoid rate limits.
+      // Devvit Blocks can be short-lived; increasing the interval reduces noise
+      // and the chance of leftover intervals causing unexpected behavior.
       setInterval(() => {
         fetchAndSet().catch((err) => console.error('Polling error', err));
-      }, 3000);
+      }, 15000);
 
       return null;
     }, { depends: [postId] });
@@ -467,7 +469,7 @@ Devvit.addCustomPostType({
         <text size="medium" weight="bold">Verified Solution</text>
         <text>{displayBody}</text>
         {isLong && (
-          <button appearance="subtle" onPress={() => setExpanded(!expanded)}>
+          <button appearance="plain" onPress={() => setExpanded(!expanded)}>
             {expanded ? "Show less" : "Show more"}
           </button>
         )}
@@ -480,7 +482,7 @@ Devvit.addCustomPostType({
               Solutionpinner - add to your subreddit
             </text>
             <button
-              appearance="subtle"
+              appearance="plain"
               onPress={() => context.ui.navigateTo("https://developers.reddit.com/apps/solutionpinner")}
             >
               Learn more

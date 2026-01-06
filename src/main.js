@@ -4,7 +4,6 @@
  * * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-
 // Learn more at developers.reddit.com/docs
 import { Devvit, useState, useAsync } from "@devvit/public-api";
 Devvit.configure({
@@ -120,9 +119,13 @@ Devvit.addTrigger({
             return;
         const body = (created.body || "").trim();
         // Accept commands anywhere in the comment: !solved, !solution, !answer (case-insensitive)
+        // Match when '!' is at start or preceded by a non-alphanumeric character so it works
+        // when the command appears mid-sentence (e.g., "Thanks — that worked! !solved").
         const commandRegex = /(^|[^A-Za-z0-9])!(?:solved|solution|answer)\b/i;
         const accepted = commandRegex.test(body);
         if (!accepted) {
+            // Keep legacy normalized debug info for logs
+            const normalized = body.toLowerCase().replace(/\s+/g, "").replace(/[^a-z0-9!]/g, "");
             console.debug(`Ignored !solved trigger — body="${body}" normalized="${normalized}"`);
             return;
         }
@@ -144,22 +147,25 @@ Devvit.addTrigger({
                 return;
             }
         }
-
-        // Detect moderator status using several possible client helpers.
+        // Try to detect whether the commenter is a moderator of the subreddit.
+        // Different runtimes expose moderator checks differently; attempt several safe probes
+        // and fall back to denying action if none succeed.
         let isModerator = false;
         try {
             const subreddit = await context.reddit.getCurrentSubreddit?.();
             if (subreddit) {
-                if (typeof context.reddit.isUserModerator === 'function') {
+                // Common helper: isUserModerator(subredditName, userId)
+                if (typeof context.reddit.isUserModerator === "function") {
                     isModerator = await context.reddit.isUserModerator(subreddit.name, created.author);
                 }
-                else if (typeof context.reddit.getModerators === 'function') {
+                else if (typeof context.reddit.getModerators === "function") {
                     const mods = await context.reddit.getModerators(subreddit.name);
                     if (Array.isArray(mods)) {
                         isModerator = mods.some((m) => m.id === created.author || m.name === created.author);
                     }
                 }
-                else if (typeof context.reddit.isModerator === 'function') {
+                else if (typeof context.reddit.isModerator === "function") {
+                    // fallback single-arg check
                     isModerator = await context.reddit.isModerator(created.author);
                 }
             }
@@ -167,7 +173,7 @@ Devvit.addTrigger({
         catch (e) {
             console.debug('Moderator check failed:', e);
         }
-
+        // Allow marking a solution if the commenter is the OP or a subreddit moderator.
         if (!isOp && !isModerator)
             return;
         const solutionId = created.parentId;
@@ -175,6 +181,123 @@ Devvit.addTrigger({
             return;
         const key = `solution:${postId}`;
         try {
+            // If there is an existing solution recorded, remove its verification reply
+            // so we don't leave multiple 'Verified solution' comments pinned.
+            try {
+                const prevSolutionId = await context.redis.get(key);
+                if (prevSolutionId && prevSolutionId !== solutionId) {
+                    // Attempt to remove previous bot reply (stored separately)
+                    try {
+                        const prevReplyKey = `solution_reply:${postId}`;
+                        const prevReplyId = await context.redis.get(prevReplyKey);
+                        if (prevReplyId) {
+                            console.debug(`Found previous verification reply id for ${postId}: ${prevReplyId}`);
+                            const prevReply = await context.reddit.getCommentById(prevReplyId).catch((err) => {
+                                console.debug(`getCommentById(${prevReplyId}) failed:`, err);
+                                return null;
+                            });
+                            if (prevReply) {
+                                try {
+                                    console.debug('Prev reply object methods:', {
+                                        hasRemove: typeof prevReply.remove === 'function',
+                                        hasDelete: typeof prevReply.delete === 'function',
+                                        hasDestroy: typeof prevReply.destroy === 'function',
+                                        hasEdit: typeof prevReply.edit === 'function',
+                                        hasDistinguish: typeof prevReply.distinguish === 'function',
+                                    });
+                                }
+                                catch (_) { }
+                                // Try to undistinguish/unpin first
+                                try {
+                                    await prevReply.distinguish?.(false).catch((e) => { console.debug('distinguish(false) failed:', e); });
+                                }
+                                catch (_) { }
+                                // Try first-class removal methods on the comment object
+                                let removed = false;
+                                try {
+                                    if (typeof prevReply.remove === 'function') {
+                                        await prevReply.remove();
+                                        removed = true;
+                                    }
+                                    else if (typeof prevReply.delete === 'function') {
+                                        await prevReply.delete();
+                                        removed = true;
+                                    }
+                                    else if (typeof prevReply.destroy === 'function') {
+                                        await prevReply.destroy();
+                                        removed = true;
+                                    }
+                                }
+                                catch (delErr) {
+                                    console.debug(`Comment-object deletion methods failed for ${prevReplyId}:`, delErr);
+                                }
+                                // Try reddit client helper delete methods if comment-object failed
+                                if (!removed) {
+                                    try {
+                                        const redditClient = context.reddit;
+                                        const clientDeleteFns = ['deleteComment', 'removeComment', 'remove', 'delete'];
+                                        for (const fn of clientDeleteFns) {
+                                            if (typeof redditClient[fn] === 'function') {
+                                                try {
+                                                    await redditClient[fn](prevReplyId);
+                                                    console.debug(`Deleted prev reply ${prevReplyId} via redditClient.${fn}`);
+                                                    removed = true;
+                                                    break;
+                                                }
+                                                catch (clientErr) {
+                                                    console.debug(`redditClient.${fn}(${prevReplyId}) failed:`, clientErr);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch (clientErr) {
+                                        console.debug('reddit client deletion attempts failed:', clientErr);
+                                    }
+                                }
+                                // Final fallback: edit the comment to indicate replacement
+                                if (!removed) {
+                                    try {
+                                        if (typeof prevReply.edit === 'function') {
+                                            await prevReply.edit?.('[Replaced by a new verified solution]\n\nThis used to be the old solution.');
+                                            console.debug(`Edited prev reply ${prevReplyId} to mark replaced`);
+                                            removed = true;
+                                        }
+                                    }
+                                    catch (editErr) {
+                                        console.debug(`Failed fallback edit for ${prevReplyId}:`, editErr);
+                                    }
+                                }
+                                if (!removed) {
+                                    console.debug(`Unable to remove or edit previous verification reply ${prevReplyId}`);
+                                }
+                            }
+                            else {
+                                console.debug(`Previous reply id ${prevReplyId} not found via getCommentById`);
+                            }
+                            // Ensure the previous reply is hidden: attempt to edit it to '[removed]'
+                            try {
+                                if (prevReply && typeof prevReply.edit === 'function') {
+                                    await prevReply.edit?.('[removed]\n\nThis used to be the old solution.').catch((e) => console.debug(`edit('[removed]') failed for ${prevReplyId}:`, e));
+                                    console.debug(`Attempted to edit prev reply ${prevReplyId} to '[removed]' and add note`);
+                                }
+                            }
+                            catch (editEnsureErr) {
+                                console.debug('Error while attempting final edit to hide previous reply', editEnsureErr);
+                            }
+                            try {
+                                await context.redis.del(prevReplyKey);
+                            }
+                            catch (_) { }
+                        }
+                    }
+                    catch (inner) {
+                        console.debug('Error while attempting to remove previous verification reply', inner);
+                    }
+                }
+            }
+            catch (e) {
+                console.debug('Error reading previous solution key', e);
+            }
             console.debug(`Saving solution for post ${postId} -> ${solutionId}`);
             await context.redis.set(key, solutionId);
             console.debug(`Saved ${key} = ${solutionId}`);
@@ -217,23 +340,33 @@ Devvit.addTrigger({
             // Try to create a Verified Solution comment on the post and attempt to sticky it
             try {
                 const solutionComment = await context.reddit.getCommentById(solutionId).catch(() => null);
-                    const permalink = solutionComment?.permalink ?? `https://www.reddit.com/comments/${postId}/_/${solutionId}`;
+                const permalink = solutionComment?.permalink ?? `https://www.reddit.com/comments/${postId}/_/${solutionId}`;
                 const post = await context.reddit.getPostById(postId);
                 if (post) {
                     // Use a short labeled markdown link so the comment is concise and the link text is short
-                    const reply = await post.addComment({ text: `Verified solution by OP - [Navigate](${permalink})` });
+                    const reply = await post.addComment({
+                        text: ` #### **Verified solution by OP** - [Navigate](${permalink})\n\n ^([Get solutionpinner](https://developers.reddit.com/apps/solutionpinner))`
+                    });
+                    // Store this verification reply id so we can remove it if a new solution replaces it later
+                    try {
+                        await context.redis.set(`solution_reply:${postId}`, reply?.id ?? "");
+                    }
+                    catch (_e) {
+                        console.debug('Failed to persist verification reply id', _e);
+                    }
                     console.debug(`Posted verification comment ${reply?.id} on ${postId}`);
-                        try {
-                            // Attempt to distinguish + sticky the reply (will fail without moderator perms).
-                            // Don't rethrow here; log failures so the trigger doesn't crash.
-                            await reply.distinguish?.(true).catch((err) => {
-                                console.debug('distinguish/sticky failed:', err);
-                            });
-                            console.debug(`Distinguished and stickied comment ${reply?.id} (or attempted)`);
-                        }
-                        catch (err) {
-                            console.debug(`Could not distinguish/sticky comment ${reply?.id}:`, err);
-                        }
+                    try {
+                        // Attempt to distinguish + sticky the reply (will fail without moderator perms).
+                        // Don't rethrow here: just log failures so the trigger doesn't crash.
+                        await reply.distinguish?.(true).catch((err) => {
+                            console.debug('distinguish/sticky failed:', err);
+                        });
+                        console.debug(`Distinguished and stickied comment ${reply?.id} (or attempted)`);
+                    }
+                    catch (err) {
+                        console.debug(`Could not distinguish/sticky comment ${reply?.id}:`, err);
+                    }
+                    // Flair setting removed per user request.
                 }
             }
             catch (e) {
@@ -276,10 +409,12 @@ Devvit.addCustomPostType({
             };
             // initial fetch
             await fetchAndSet();
-            // poll every 3s (no reliable cleanup API available in Blocks; this is acceptable for short-lived render contexts)
+            // poll every 15s to reduce Redis calls and avoid rate limits.
+            // Devvit Blocks can be short-lived; increasing the interval reduces noise
+            // and the chance of leftover intervals causing unexpected behavior.
             setInterval(() => {
                 fetchAndSet().catch((err) => console.error('Polling error', err));
-            }, 3000);
+            }, 15000);
             return null;
         }, { depends: [postId] });
         if (solutionData === undefined) {
@@ -290,8 +425,7 @@ Devvit.addCustomPostType({
             return (Devvit.createElement("vstack", { height: "100%", width: "100%", gap: "small", alignment: "center middle", padding: "medium" },
                 Devvit.createElement("text", { size: "large" }, "Help Wanted"),
                 Devvit.createElement("text", null,
-                    "The OP hasn't verified a solution yet. The OP or a subreddit moderator can mark a verified",
-                    " solution by replying to a helpful comment with",
+                    "The OP hasn't verified a solution yet. The OP or a subreddit moderator can mark a verified solution by replying to a helpful comment with ",
                     Devvit.createElement("text", { weight: "bold" }, "!solved"),
                     ".")));
         }
@@ -300,10 +434,13 @@ Devvit.addCustomPostType({
         const isLong = commentBody.length > maxLength;
         const displayBody = !isLong || expanded ? commentBody : commentBody.slice(0, maxLength) + "…";
         return (Devvit.createElement("vstack", { height: "100%", width: "100%", gap: "small", alignment: "center middle", borderColor: "green", border: "thick", padding: "medium" },
-            Devvit.createElement("text", { size: "large", weight: "bold" }, "Verified Solution"),
+            Devvit.createElement("text", { size: "medium", weight: "bold" }, "Verified Solution"),
             Devvit.createElement("text", null, displayBody),
-            isLong && Devvit.createElement("button", { appearance: "subtle", onPress: () => setExpanded(!expanded) }, expanded ? "Show less" : "Show more"),
-            permalink && (Devvit.createElement("button", { appearance: "primary", onPress: () => context.ui.navigateTo(permalink) }, "Go to answer"))));
+            isLong && (Devvit.createElement("button", { appearance: "plain", onPress: () => setExpanded(!expanded) }, expanded ? "Show less" : "Show more")),
+            permalink && (Devvit.createElement("vstack", { gap: "small", alignment: "center middle" },
+                Devvit.createElement("button", { appearance: "primary", onPress: () => context.ui.navigateTo(permalink) }, "Go to answer"),
+                Devvit.createElement("text", { size: "xsmall" }, "Solutionpinner - add to your subreddit"),
+                Devvit.createElement("button", { appearance: "plain", onPress: () => context.ui.navigateTo("https://developers.reddit.com/apps/solutionpinner") }, "Learn more")))));
     },
 });
 export default Devvit;
