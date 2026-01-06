@@ -1,0 +1,47 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# dotenv
+.env
+.env.*.local
+
+# Build outputs
+dist/
+build/
+lib/
+.cache/
+
+# TypeScript
+*.tsbuildinfo
+
+# VSCode
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Coverage
+coverage/
+*.lcov
+
+# Misc
+*.local
+npm-packages-offline-cache/
+.eslintcache
+
+# OneDrive temp files
+~$*
+
+# Optional: ignore local devvit artifacts (uncomment if used)
+# .devvit/
+# .playtest/
