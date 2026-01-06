@@ -1,3 +1,10 @@
+/**
+ * SolutionPinner
+ * Copyright (c) 2026 [Your Name/Handle]
+ * * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ */
+
 // Learn more at developers.reddit.com/docs
 import { Devvit, useState, useAsync, TriggerContext } from "@devvit/public-api";
 
