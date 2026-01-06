@@ -1,6 +1,6 @@
 /**
  * SolutionPinner
- * Copyright (c) 2026 [Your Name/Handle]
+ * Copyright (c) 2026 JowiDigital
  * * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -17,7 +17,7 @@ const createPost = async (context: Devvit.Context | TriggerContext) => {
   const { reddit } = context;
   const subreddit = await reddit.getCurrentSubreddit();
   const post = await reddit.submitPost({
-    title: "My devvit post",
+    title: "SolutionPinner Experience Post",
     subredditName: subreddit.name,
     // The preview appears while the post loads
     preview: (
